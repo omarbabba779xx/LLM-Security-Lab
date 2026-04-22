@@ -93,11 +93,11 @@ class SecureTools:
         self.sandbox = ToolSandbox()
         self.authorized_users = set()
         self.tool_policies = {
-            "read_file": {"require_auth": False, "max_size": 100000},
+            "read_file": {"require_auth": True, "max_size": 100000},
             "write_file": {"require_auth": True, "allowed_extensions": [".txt", ".json", ".csv"]},
             "send_email": {"require_auth": True, "allowed_domains": ["example.com", "company.com"]},
-            "search_database": {"require_auth": False, "max_results": 100, "allow_raw_sql": False},
-            "calculator": {"require_auth": False},
+            "search_database": {"require_auth": True, "max_results": 100, "allow_raw_sql": False},
+            "calculator": {"require_auth": True},
         }
 
     def authenticate_user(self, user_id: str):

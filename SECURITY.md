@@ -1,80 +1,139 @@
-# Politique de sécurité — LLM Security Lab
+# Security Policy — LLM Security Lab
 
-## Threat model
+## Supported Versions
 
-Ce projet modélise un assistant LLM avec RAG et outils agentiques exposé via une API. Les menaces considérées suivent le **OWASP Top 10 for LLM Applications**.
-
-### Acteurs
-
-| Acteur | Capacités | Objectif |
-|---|---|---|
-| Utilisateur légitime (`reader`) | lecture RAG, calculatrice, lecture fichiers sandbox | obtenir des réponses utiles |
-| Contributeur (`editor`) | ingestion de documents, écriture fichiers sandbox | alimenter le corpus |
-| Admin (`admin`) | tous les rôles + audit + (opt-in) mode vulnérable | opérer le système |
-| Attaquant externe | prompts arbitraires, documents empoisonnés | injection, exfiltration, RCE, DoS |
-| Insider malveillant | jeton valide volé | abus de privilèges |
-
-### Surfaces attaquées
-
-1. **Prompt utilisateur** → injection directe
-2. **Corpus RAG** → injection indirecte + poisoning
-3. **Outils** → path traversal, RCE via shell, exfiltration par email/HTTP
-4. **Sortie LLM** → XSS, SQLi, template injection chez le consommateur
-
-## Contrôles implémentés
-
-### Préventifs
-
-- **AuthN** : `X-API-Key` validé côté serveur, pas de confiance dans le body client
-- **AuthZ** : rôles `reader`/`editor`/`admin`, permissions par outil
-- **Opt-in vulnérable** : flag `LLM_LAB_ENABLE_VULNERABLE_DEMO` + rôle admin
-- **Sandbox fichiers** : `pathlib.Path.resolve()` + `relative_to()` sur `data/`
-- **Calculatrice** : `ast.parse()` restreint à `Add/Sub/Mult/Div/Mod`, pas d'`eval()`
-- **Normalisation Unicode** : NFKD avant toute regex de détection
-- **Validation input** : longueurs max query/contexte, extensions whitelist
-- **Validation output** : patterns XSS, SQLi, JNDI, template
-- **Détection secrets** : regex OpenAI/GitHub/AWS/JWT + redaction
-- **Isolement** : RAG scopé par `user_id`, pas de fuite cross-tenant
-
-### Détectifs
-
-- **Audit log** : `data/audit_log.json` — toute requête RAG, exécution d'outil, quarantaine
-- **Scan poisoning** : à l'ingestion, score + quarantaine ≥ 1 match
-- **Health endpoint** : `/health` pour supervision externe
-
-### Correctifs
-
-- **Rate limiting** : SlowAPI, 30/min sur `/rag/query`, 60/min global
-- **Quarantaine** : documents suspects rejetés, journalisés, jamais indexés
-- **Fallback LLM** : si OpenAI indisponible, bascule sur mock déterministe
-
-## Ce qui n'est **pas** couvert
-
-| Manque | Mitigation nécessaire en prod |
+| Version | Supported |
 |---|---|
-| Rotation des jetons | OIDC/OAuth2 + short-lived tokens |
-| Chiffrement au repos | DB chiffrée (KMS) au lieu de JSON local |
-| Détection ML | Classifieur de prompts + NLI sur documents |
-| mTLS | Terminaison TLS + mutual auth |
-| SIEM | Export audit → Splunk/ELK + alerting |
-| WAF | Reverse proxy (Cloudflare, Nginx) |
-| Content filtering sortant | Pipeline de modération côté LLM |
+| 2.x (current) | ✅ Active |
+| 1.x | ⚠️ Security fixes only |
+| < 1.0 | ❌ End of life |
 
-## Signalement de vulnérabilité
+## Threat Model
 
-Ce dépôt étant un laboratoire pédagogique, merci d'ouvrir une issue publique sur GitHub pour toute vulnérabilité identifiée. **Ne pas** déployer le mode vulnérable (`LLM_LAB_ENABLE_VULNERABLE_DEMO=true`) sur un réseau accessible.
+This project models an LLM assistant with RAG and agentic tools exposed via a FastAPI API. Threats follow the **OWASP Top 10 for LLM Applications**.
 
-## Vérifications avant mise en ligne
+### Actors
+
+| Actor | Capabilities | Objective |
+|---|---|---|
+| Legitimate user (`reader`) | RAG queries, calculator, file read in sandbox | Get useful answers |
+| Contributor (`editor`) | Document ingestion, sandbox file write | Feed the corpus |
+| Admin (`admin`) | All roles + audit + (opt-in) vulnerable mode | Operate the system |
+| External attacker | Arbitrary prompts, poisoned documents | Injection, exfiltration, RCE, DoS |
+| Malicious insider | Stolen valid token | Privilege abuse |
+
+### Attack Surfaces
+
+1. **User prompt** → direct injection
+2. **RAG corpus** → indirect injection + data poisoning
+3. **Tools** → path traversal, RCE via shell, exfiltration via email/HTTP
+4. **LLM output** → XSS, SQLi, template injection at downstream consumer
+5. **Authentication** → token theft, replay, privilege escalation
+
+## Implemented Controls
+
+### Preventive
+
+- **AuthN**: Dual mode — JWT short-lived tokens (HS256, configurable TTL) + static API keys for dev
+- **AuthZ**: Capability-based RBAC (`rag:read`, `tool:write_file`, `security:audit`, etc.)
+- **All tools require authentication** — no unauthenticated tool access
+- **Egress control**: Domain allowlist for outbound URLs
+- **Opt-in vulnerable mode**: env flag `LLM_LAB_ENABLE_VULNERABLE_DEMO` + admin capability
+- **File sandbox**: `pathlib.Path.resolve()` + `relative_to()` confined to `data/`
+- **Calculator**: `ast.parse()` restricted to `Add/Sub/Mult/Div/Mod` — no `eval()`
+- **Unicode normalization**: NFKD before all regex detection
+- **Input validation**: max query/context length, extension whitelist
+- **Output validation**: categorized patterns (XSS, SQLi, JNDI, template, code injection)
+- **Secret detection**: regex + Shannon entropy scanning + automatic redaction
+- **Tenant isolation**: RAG scoped per `user_id`, no cross-tenant leakage
+- **Correlation IDs**: every request tagged for traceability
+
+### Detective
+
+- **Layered detection**: regex rules → heuristic scoring → TF-IDF semantic classifier → task allowlist
+- **FP/FN metrics**: every detector tracks precision, recall, F1 for measurable evaluation
+- **Audit log**: `data/audit_log.json` + `data/audit_log.jsonl` (SIEM-ready) with severity levels
+- **Poisoning scan**: regex + semantic similarity at ingestion, quarantine ≥ 0.3 score
+- **Health endpoint**: `/health` for external monitoring
+
+### Corrective
+
+- **Rate limiting**: SlowAPI — 30/min on `/rag/query`, 60/min global
+- **Quarantine**: suspect documents rejected, logged, never indexed
+- **LLM fallback**: if OpenAI unavailable, deterministic mock response
+
+### Supply Chain
+
+- **CI/CD**: GitHub Actions with pytest, ruff, mypy, bandit, semgrep, pip-audit
+- **CodeQL**: weekly + on-push static analysis
+- **Dependabot**: automated dependency updates
+- **SBOM**: CycloneDX generated on every CI run
+
+## What Is **NOT** Covered (Production Gaps)
+
+| Gap | Required Mitigation |
+|---|---|
+| Token rotation | OIDC/OAuth2 with short-lived + refresh tokens |
+| Encryption at rest | KMS-encrypted database instead of local JSON |
+| ML detection | Fine-tuned transformer classifier + NLI |
+| mTLS | TLS termination + mutual auth |
+| SIEM | Export audit → Splunk/ELK + real-time alerting |
+| WAF | Reverse proxy (Cloudflare, ModSecurity) |
+| Outbound content filtering | LLM moderation pipeline |
+
+## Reporting a Vulnerability
+
+> **⚠️ Do NOT open a public GitHub issue for security vulnerabilities.**
+
+### Private Vulnerability Reporting (Preferred)
+
+Use **GitHub's Private Vulnerability Reporting**:
+
+1. Go to [Security Advisories → New](https://github.com/omarbabba779xx/llm-security-lab/security/advisories/new)
+2. Fill in the vulnerability details
+3. We will triage within **48 hours** and coordinate a fix
+
+### Email (Alternative)
+
+If private reporting is unavailable, email the maintainer with:
+- Description of the vulnerability
+- Steps to reproduce
+- Impact assessment
+- Suggested fix (if any)
+
+### What to Expect
+
+| Timeline | Action |
+|---|---|
+| **48h** | Acknowledgment of report |
+| **7 days** | Triage and severity assessment |
+| **30 days** | Fix developed and tested |
+| **45 days** | Security advisory published |
+
+### Scope
+
+- Vulnerabilities in `app/secure/` are **in scope** — these should be robust
+- Vulnerabilities in `app/vulnerable/` are **intentional** and out of scope
+- Infrastructure issues (CI, dependencies) are in scope
+
+## Pre-Deployment Checklist
 
 ```bash
-# 1. Mode vulnérable désactivé
+# 1. Vulnerable mode disabled
 grep -r "LLM_LAB_ENABLE_VULNERABLE_DEMO" .env
-# doit renvoyer: LLM_LAB_ENABLE_VULNERABLE_DEMO=false
+# must return: LLM_LAB_ENABLE_VULNERABLE_DEMO=false
 
-# 2. Jetons régénérés
+# 2. Tokens regenerated
 python -c "import secrets; print(secrets.token_urlsafe(32))"
 
-# 3. Tests verts
+# 3. JWT secret set
+echo $LLM_LAB_JWT_SECRET  # must be set, not default
+
+# 4. All tests green
 python -m pytest -q
 python tests/test_attacks.py
+
+# 5. Security scan clean
+bandit -r app/ --severity-level medium
+pip-audit --requirement requirements.txt
 ```

@@ -48,22 +48,51 @@ class JSONStore:
 
 
 class AuditLogger:
-    """Journal d'audit des événements de sécurité."""
+    """Journal d'audit des événements de sécurité avec sévérité et correlation ID."""
+
+    VALID_SEVERITIES = {"debug", "info", "warning", "error", "critical"}
 
     def __init__(self):
         self.store = JSONStore("audit_log")
+        self._jsonl_path = DATA_DIR / "audit_log.jsonl"
 
-    def log(self, event: str, details: Dict[str, Any]) -> None:
+    def log(
+        self,
+        event: str,
+        details: Dict[str, Any],
+        severity: str = "info",
+        correlation_id: str = "",
+    ) -> None:
         import datetime
+        if severity not in self.VALID_SEVERITIES:
+            severity = "info"
         record = {
             "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "event": event,
+            "severity": severity,
+            "correlation_id": correlation_id or details.get("correlation_id", ""),
             "details": details,
         }
         self.store.append(record)
+        self._append_jsonl(record)
 
-    def read(self) -> List[dict]:
-        return self.store.read_all()
+    def _append_jsonl(self, record: dict) -> None:
+        """Append a single record in JSONL format for SIEM export."""
+        try:
+            with self._jsonl_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+
+    def read(self, severity: str | None = None, limit: int = 500) -> List[dict]:
+        records = self.store.read_all()
+        if severity:
+            records = [r for r in records if r.get("severity") == severity]
+        return records[-limit:]
+
+    def export_jsonl(self) -> str:
+        """Return path to JSONL export file."""
+        return str(self._jsonl_path)
 
 
 class DocumentStore:
