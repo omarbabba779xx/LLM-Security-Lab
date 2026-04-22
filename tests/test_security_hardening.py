@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 import app.api as api_module
+from app.auth import get_demo_api_key
 from app.secure.filters import DataPoisoningDetector, PromptInjectionDetector
 from app.secure.tools import SecureTools, ToolSandbox
 
@@ -29,7 +30,7 @@ def client(monkeypatch):
 
 
 def auth_headers(role: str) -> dict[str, str]:
-    return {"X-API-Key": api_module.get_demo_api_key(role)}
+    return {"X-API-Key": get_demo_api_key(role)}
 
 
 def test_secure_tool_execution_requires_real_authentication(client: TestClient):

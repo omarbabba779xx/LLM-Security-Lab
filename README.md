@@ -2,10 +2,13 @@
 
 > **Laboratoire de sécurité pour applications LLM** — démonstration pratique des attaques du **OWASP Top 10 for LLM Applications** et de leurs contre-mesures, sur un système RAG + agent à outils.
 
+[![CI](https://github.com/omarbabba779xx/llm-security-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/omarbabba779xx/llm-security-lab/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/omarbabba779xx/llm-security-lab/actions/workflows/codeql.yml/badge.svg)](https://github.com/omarbabba779xx/llm-security-lab/actions/workflows/codeql.yml)
 [![Python](https://img.shields.io/badge/python-3.12-blue)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688)](https://fastapi.tiangolo.com/)
 [![OWASP](https://img.shields.io/badge/OWASP-LLM%20Top%2010-red)](https://owasp.org/www-project-top-10-for-large-language-model-applications/)
-[![Tests](https://img.shields.io/badge/tests-14%20pytest%20%2B%2021%20bench-brightgreen)](#tests)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-86%20pytest%20%2B%2021%20bench-brightgreen)](#tests)
 
 ---
 
@@ -25,12 +28,14 @@ La philosophie : **deux surfaces côte à côte** — `app/vulnerable/` sert de 
 
 | Avant (vulnérable) | Après (sécurisé) |
 |---|---|
-| `user_id=admin` dans le JSON client = mode admin | Auth serveur via `X-API-Key`, rôles `reader/editor/admin` |
+| `user_id=admin` dans le JSON client = mode admin | JWT short-lived + capability RBAC (`rag:read`, `tool:write_file`, …) |
 | `eval()` sur la calculatrice | Évaluateur AST restreint (add/sub/mul/div/mod uniquement) |
 | `open(path)` sans validation | Sandbox `pathlib.Path.resolve()` + `relative_to()` |
-| Regex simples sensibles aux homoglyphes | Normalisation NFKD avant détection |
-| Documents empoisonnés acceptés | Quarantaine automatique + audit log |
-| Pas de rate limit, pas d'audit | SlowAPI (30/min RAG, 60/min global) + journal JSON persistant |
+| Regex simples sensibles aux homoglyphes | Détection 4 couches : regex → scoring → TF-IDF sémantique → allowlist |
+| Documents empoisonnés acceptés | Quarantaine automatique + analyse sémantique + métriques FP/FN |
+| Pas de rate limit, pas d'audit | SlowAPI + audit log avec sévérité + JSONL export + correlation IDs |
+| Aucun contrôle sortant | Egress control par allowlist de domaines |
+| Pas de CI/CD | GitHub Actions (pytest, ruff, bandit, semgrep, pip-audit) + CodeQL + Dependabot + SBOM |
 
 ---
 
@@ -263,27 +268,42 @@ graph LR
 
 ```text
 projet cyber/
+├── .github/
+│   ├── workflows/
+│   │   ├── ci.yml             # CI: pytest, ruff, mypy, bandit, semgrep, pip-audit, SBOM
+│   │   └── codeql.yml         # CodeQL static analysis
+│   └── dependabot.yml         # Dependency updates
 ├── app/
-│   ├── api.py                 # FastAPI : auth par rôles, rate limit, audit
+│   ├── api.py                 # FastAPI : JWT + capability RBAC, rate limit, correlation IDs
+│   ├── auth.py                # JWT HS256, static tokens, capabilities, RBAC
 │   ├── llm_engine.py          # Moteur LLM simulé (démo locale)
 │   ├── llm_backend.py         # Backend OpenAI optionnel avec fallback mock
-│   ├── persistence.py         # JSONStore, AuditLogger, DocumentStore
+│   ├── persistence.py         # AuditLogger (sévérité + JSONL), DocumentStore, UserStore
 │   ├── vulnerable/            # Surface volontairement exploitable
 │   │   ├── rag_system.py      #   RAG sans filtre, secrets hardcodés
 │   │   └── tools.py           #   Shell, lecture/écriture sans sandbox
 │   └── secure/                # Contre-mesures testables
-│       ├── filters.py         #   4 détecteurs : injection, secrets, output, poisoning
+│       ├── filters.py         #   Détection multi-couches + TF-IDF + métriques FP/FN
 │       ├── rag_system.py      #   SecureRAG complet avec LLM backend
-│       └── tools.py           #   Sandbox pathlib + calculatrice AST
+│       └── tools.py           #   Sandbox pathlib + calculatrice AST + auth obligatoire
 ├── data/                      # Unique zone autorisée pour la sandbox
 ├── docs/
 │   └── OWASP_LLMSecurity.md  # Mapping détaillé LLM01–LLM10 → code
 ├── tests/
 │   ├── test_attacks.py        # Benchmark CLI (21 checks)
-│   └── test_security_hardening.py  # 14 tests pytest
+│   ├── test_security_hardening.py  # Tests pytest (auth, RBAC, sandbox)
+│   ├── test_fuzzing.py        # Fuzzing : 72 tests multilingues + obfuscation
+│   └── test_load.py           # Load test + métriques P95/P99/RPS
 ├── main.py                    # Démonstration interactive console
+├── Dockerfile                 # Container image
+├── docker-compose.yml         # One-command demo launch
+├── pyproject.toml             # ruff, mypy, pytest, bandit config
 ├── requirements.txt
-├── SECURITY.md                # Threat model et politique de sécurité
+├── LICENSE                    # MIT
+├── CONTRIBUTING.md
+├── CHANGELOG.md
+├── ROADMAP.md
+├── SECURITY.md                # Threat model, disclosure, checklist
 └── README.md
 ```
 
@@ -310,6 +330,9 @@ cp .env.example .env              # puis modifier les jetons
 | `LLM_LAB_ENABLE_VULNERABLE_DEMO` | `false` | Active les routes vulnérables (admin-only) |
 | `LLM_LAB_USE_REAL_LLM` | `false` | Bascule vers OpenAI si `OPENAI_API_KEY` est défini |
 | `LLM_LAB_MODEL` | `gpt-4o-mini` | Modèle OpenAI utilisé |
+| `LLM_LAB_JWT_SECRET` | auto-généré | Secret HMAC pour signature JWT |
+| `LLM_LAB_JWT_TTL_MINUTES` | `30` | Durée de vie des JWT |
+| `LLM_LAB_AUTH_MODE` | `static` | Mode d'auth (`static` ou `jwt`) |
 | `OPENAI_API_KEY` | — | Clé OpenAI (jamais loggée ni affichée) |
 
 ---
@@ -333,7 +356,7 @@ python -m pytest -q
 Résultat attendu :
 
 ```
-14 passed
+86 passed
 ```
 
 ### 3. Benchmark CLI
@@ -350,7 +373,31 @@ Compromissions demontrees cote vulnerable: 6
 Defenses efficaces cote securise: 20
 ```
 
-### 4. API FastAPI
+### 4. Load test + métriques
+
+```bash
+python tests/test_load.py
+```
+
+Résultat (extrait) :
+
+```
+PromptInjection (attacks)   100  100.0%  0.38ms avg  2602 RPS
+PromptInjection (benign)    100    0.0%  0.32ms avg  3134 RPS
+OutputValidator (dangerous) 100  100.0%  0.01ms avg  86k RPS
+
+PromptInjection  — P=1.00  R=1.00  F1=1.00
+DataPoisoning    — P=1.00  R=1.00  F1=1.00
+```
+
+### 5. Docker
+
+```bash
+docker compose up --build
+# API disponible sur http://localhost:8000
+```
+
+### 6. API FastAPI
 
 ```bash
 uvicorn app.api:app --reload
@@ -360,16 +407,18 @@ Documentation interactive : http://127.0.0.1:8000/docs
 
 #### Endpoints principaux
 
-| Méthode | Route | Rôle requis | Description |
+| Méthode | Route | Capability requise | Description |
 |---|---|---|---|
 | `GET` | `/health` | public | Healthcheck |
-| `POST` | `/rag/query` | reader+ | Interroger le RAG (30/min) |
-| `POST` | `/rag/document` | editor+ | Ajouter un document (scan poisoning) |
-| `POST` | `/tools/execute` | variable | Exécuter un outil sandboxé |
-| `POST` | `/security/scan-prompt` | public | Détecter injection dans un prompt |
-| `POST` | `/security/scan-secrets` | public | Détecter fuite de secrets |
-| `POST` | `/security/validate-output` | public | Valider une sortie LLM |
-| `GET`  | `/security/audit` | admin | Consulter le journal d'audit |
+| `POST` | `/auth/token` | public | Obtenir un JWT court (échange secret → token) |
+| `GET` | `/auth/capabilities` | authentifié | Lister ses capabilities |
+| `POST` | `/rag/query` | `rag:read` | Interroger le RAG (30/min) |
+| `POST` | `/rag/document` | `rag:write` | Ajouter un document (scan poisoning) |
+| `POST` | `/tools/execute` | `tool:*` | Exécuter un outil sandboxé |
+| `POST` | `/security/scan-prompt` | `security:scan` | Détecter injection (multi-couches) |
+| `POST` | `/security/scan-secrets` | `security:scan` | Détecter fuite de secrets |
+| `POST` | `/security/validate-output` | `security:scan` | Valider une sortie LLM |
+| `GET`  | `/security/audit` | `security:audit` | Journal d'audit (JSONL export) |
 
 Exemple :
 
@@ -489,9 +538,15 @@ pie title Benchmark de sécurité (21 checks)
 ```
 
 ```mermaid
-pie title Tests pytest (14 tests)
-    "Passés" : 14
+pie title Tests pytest (86 tests)
+    "Passés" : 86
     "Échoués" : 0
+```
+
+```mermaid
+pie title Fuzzing — Injection (22 payloads)
+    "Bloqués (TP)" : 22
+    "Faux positifs" : 0
 ```
 
 ---
@@ -502,20 +557,22 @@ Ce projet est un **laboratoire pédagogique**, pas un produit de production :
 
 ```mermaid
 graph LR
-    subgraph IMPL["Implémenté dans ce TP"]
-        A1["Auth par jetons statiques"]
-        A2["Détection regex + NFKD"]
-        A3["Mock LLM local"]
-        A4["JSON local"]
-        A5["Audit log fichier"]
+    subgraph IMPL["Implémenté (v2.0)"]
+        A1["JWT + capability RBAC"]
+        A2["4 couches: regex+scoring+TF-IDF+allowlist"]
+        A3["Mock LLM + OpenAI optionnel"]
+        A4["JSON + JSONL export"]
+        A5["Audit log + correlation IDs"]
+        A6["CI: Actions + CodeQL + Dependabot + SBOM"]
     end
 
     subgraph PROD["Nécessaire en production"]
         B1["OIDC / OAuth2 / mTLS"]
-        B2["Classifieur ML + NLI"]
+        B2["Classifieur ML fine-tuné + NLI"]
         B3["GPT-4 / Claude / Mistral"]
         B4["PostgreSQL + KMS"]
-        B5["SIEM + alerting"]
+        B5["SIEM + alerting temps réel"]
+        B6["SLSA provenance + WAF"]
     end
 
     A1 -.->|"upgrade"| B1
@@ -523,6 +580,7 @@ graph LR
     A3 -.->|"upgrade"| B3
     A4 -.->|"upgrade"| B4
     A5 -.->|"upgrade"| B5
+    A6 -.->|"upgrade"| B6
 
     style IMPL fill:#e8f5e9,stroke:#2e7d32
     style PROD fill:#fff3e0,stroke:#e65100
@@ -542,4 +600,6 @@ Le fichier [`SECURITY.md`](SECURITY.md) détaille le threat model et les contrô
 
 ## Licence
 
-Projet académique — usage pédagogique uniquement. Ne pas déployer le mode vulnérable sur un réseau public.
+[MIT License](LICENSE) — voir aussi [CONTRIBUTING.md](CONTRIBUTING.md), [CHANGELOG.md](CHANGELOG.md), [ROADMAP.md](ROADMAP.md).
+
+⚠️ Ne pas déployer le mode vulnérable (`LLM_LAB_ENABLE_VULNERABLE_DEMO=true`) sur un réseau public.

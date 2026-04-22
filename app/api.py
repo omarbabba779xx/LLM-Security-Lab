@@ -1,11 +1,20 @@
-"""API FastAPI pour demonstration securisee des attaques LLM."""
+"""API FastAPI pour demonstration securisee des attaques LLM.
 
-from dataclasses import dataclass
+Features:
+- JWT + static token dual auth
+- Capability-based RBAC (rag:read, tool:write_file, etc.)
+- Correlation IDs on every request
+- Rate limiting (SlowAPI)
+- Audit logging with severity levels
+- Egress control on outbound URLs
+"""
+
 import os
 import secrets
+import uuid
 from typing import Any, Dict, List
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
@@ -13,6 +22,16 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
+from app.auth import (
+    AuthContext,
+    Capability,
+    TOOL_CAPABILITY_MAP,
+    create_jwt,
+    get_demo_api_key,
+    require_capability,
+    require_roles,
+    resolve_auth,
+)
 from app.persistence import get_audit_logger
 from app.secure.filters import DataPoisoningDetector, OutputValidator, PromptInjectionDetector, SecretLeakDetector
 from app.secure.rag_system import SecureRAG
@@ -27,13 +46,47 @@ limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
 app = FastAPI(
     title="LLM Security Lab",
     description="Demonstration de vulnerabilites LLM et contre-mesures OWASP",
-    version="1.2.0",
+    version="2.0.0",
 )
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 audit = get_audit_logger()
 
+
+# ---------------------------------------------------------------------------
+# Middleware: correlation ID
+# ---------------------------------------------------------------------------
+
+@app.middleware("http")
+async def correlation_id_middleware(request: Request, call_next):
+    cid = request.headers.get("X-Correlation-ID", str(uuid.uuid4()))
+    request.state.correlation_id = cid
+    response: Response = await call_next(request)
+    response.headers["X-Correlation-ID"] = cid
+    return response
+
+
+# ---------------------------------------------------------------------------
+# Egress control — block outbound to untrusted domains
+# ---------------------------------------------------------------------------
+
+ALLOWED_EGRESS_DOMAINS = {"api.openai.com", "example.com", "company.com"}
+
+
+def check_egress_url(url: str) -> bool:
+    """Return True if url domain is in the allowlist."""
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(url)
+        return parsed.hostname in ALLOWED_EGRESS_DOMAINS
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def _env_flag(name: str, default: bool = False) -> bool:
     raw_value = os.getenv(name)
@@ -42,86 +95,22 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return raw_value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-_GENERATED_TOKENS = {
-    "admin": os.getenv("LLM_LAB_ADMIN_TOKEN") or secrets.token_urlsafe(24),
-    "editor": os.getenv("LLM_LAB_EDITOR_TOKEN") or secrets.token_urlsafe(24),
-    "reader": os.getenv("LLM_LAB_READER_TOKEN") or secrets.token_urlsafe(24),
-}
-
-
-@dataclass(frozen=True)
-class AuthContext:
-    user_id: str
-    roles: frozenset[str]
-
-
-def _build_token_map() -> Dict[str, AuthContext]:
-    return {
-        _GENERATED_TOKENS["admin"]: AuthContext(
-            user_id="lab-admin",
-            roles=frozenset({"admin", "editor", "reader"}),
-        ),
-        _GENERATED_TOKENS["editor"]: AuthContext(
-            user_id="lab-editor",
-            roles=frozenset({"editor", "reader"}),
-        ),
-        _GENERATED_TOKENS["reader"]: AuthContext(
-            user_id="lab-reader",
-            roles=frozenset({"reader"}),
-        ),
-    }
-
-
-def get_demo_api_key(role: str) -> str:
-    """Expose les jetons de demo pour les tests et l'integration locale."""
-    if role not in _GENERATED_TOKENS:
-        raise KeyError(f"Role inconnu: {role}")
-    return _GENERATED_TOKENS[role]
-
-
-def get_current_user(x_api_key: str | None = Header(default=None, alias="X-API-Key")) -> AuthContext:
-    """Resout l'identite depuis un jeton d'API controle par le serveur."""
-    if not x_api_key:
-        raise HTTPException(status_code=401, detail="Authentification requise")
-
-    auth_context = _build_token_map().get(x_api_key)
-    if auth_context is None:
-        raise HTTPException(status_code=401, detail="Jeton API invalide")
-
-    return auth_context
-
-
-def require_roles(*required_roles: str):
-    """Fabrique une dependance qui exige au moins un role autorise."""
-
-    def dependency(user: AuthContext = Depends(get_current_user)) -> AuthContext:
-        if not set(required_roles).intersection(user.roles):
-            raise HTTPException(status_code=403, detail="Role insuffisant")
-        return user
-
-    return dependency
-
-
 def _ensure_vulnerable_demo_allowed(user: AuthContext):
     if not _env_flag("LLM_LAB_ENABLE_VULNERABLE_DEMO", default=False):
         raise HTTPException(status_code=403, detail="Mode vulnerable desactive")
-    if "admin" not in user.roles:
+    if not user.has_capability(Capability.ADMIN):
         raise HTTPException(status_code=403, detail="Acces admin requis pour le mode vulnerable")
 
 
-def _ensure_tool_role(tool_name: str, user: AuthContext):
-    permissions = {
-        "read_file": {"reader", "editor", "admin"},
-        "search_db": {"reader", "editor", "admin"},
-        "calculator": {"reader", "editor", "admin"},
-        "write_file": {"editor", "admin"},
-        "send_email": {"editor", "admin"},
-    }
-    allowed_roles = permissions.get(tool_name)
-    if allowed_roles is None:
+def _ensure_tool_capability(tool_name: str, user: AuthContext):
+    cap = TOOL_CAPABILITY_MAP.get(tool_name)
+    if cap is None:
         raise HTTPException(status_code=400, detail=f"Outil securise inconnu: {tool_name}")
-    if not allowed_roles.intersection(user.roles):
-        raise HTTPException(status_code=403, detail="Role insuffisant pour cet outil")
+    if not user.has_capability(cap):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Capability manquante: {cap.value}",
+        )
 
 
 class QueryRequest(BaseModel):
@@ -149,6 +138,27 @@ secure_rags: Dict[str, SecureRAG] = {}
 tools = SecureTools()
 
 
+# ---------------------------------------------------------------------------
+# Auth endpoint — issue JWT tokens
+# ---------------------------------------------------------------------------
+
+class TokenRequest(BaseModel):
+    username: str = Field(..., description="Username")
+    role: str = Field(..., description="Role: reader, editor, or admin")
+    secret: str = Field(..., description="Shared secret (static token) to prove identity")
+
+
+@app.post("/auth/token")
+def issue_token(body: TokenRequest) -> Dict[str, Any]:
+    """Exchange a static API key for a short-lived JWT."""
+    expected = get_demo_api_key(body.role) if body.role in ("admin", "editor", "reader") else None
+    if expected is None or not secrets.compare_digest(body.secret, expected):
+        raise HTTPException(status_code=401, detail="Credentials invalides")
+    token_data = create_jwt(user_id=body.username or f"lab-{body.role}", roles=[body.role])
+    audit.log("token_issued", {"user": body.username, "role": body.role}, severity="info")
+    return token_data
+
+
 def _get_secure_rag_for_user(user_id: str) -> SecureRAG:
     rag = secure_rags.get(user_id)
     if rag is None:
@@ -159,9 +169,10 @@ def _get_secure_rag_for_user(user_id: str) -> SecureRAG:
 
 @app.post("/rag/query")
 @limiter.limit("30/minute")
-def rag_query(request: Request, body: QueryRequest, user: AuthContext = Depends(get_current_user)) -> Dict[str, Any]:
+def rag_query(request: Request, body: QueryRequest, user: AuthContext = Depends(require_capability(Capability.RAG_READ))) -> Dict[str, Any]:
     """Interroger le systeme RAG securise ou, explicitement, le mode vulnerable."""
-    audit.log("rag_query", {"user": user.user_id, "secure": body.use_secure})
+    cid = getattr(request.state, "correlation_id", "")
+    audit.log("rag_query", {"user": user.user_id, "secure": body.use_secure, "correlation_id": cid})
     if body.use_secure:
         return _get_secure_rag_for_user(user.user_id).generate_response(body.query)
 
@@ -173,7 +184,7 @@ def rag_query(request: Request, body: QueryRequest, user: AuthContext = Depends(
 def add_document(
     request: DocumentRequest,
     secure: bool = True,
-    user: AuthContext = Depends(require_roles("editor", "admin")),
+    user: AuthContext = Depends(require_capability(Capability.RAG_WRITE)),
 ) -> Dict[str, Any]:
     """Ajouter un document au corpus RAG autorise."""
     if secure:
@@ -190,9 +201,10 @@ def add_document(
 
 
 @app.post("/tools/execute")
-def execute_tool(request: ToolRequest, user: AuthContext = Depends(get_current_user)) -> Dict[str, Any]:
+def execute_tool(req: Request, request: ToolRequest, user: AuthContext = Depends(resolve_auth)) -> Dict[str, Any]:
     """Executer un outil securise; le mode vulnerable reste opt-in et admin-only."""
-    audit.log("tool_execute", {"user": user.user_id, "tool": request.tool})
+    cid = getattr(req.state, "correlation_id", "")
+    audit.log("tool_execute", {"user": user.user_id, "tool": request.tool, "correlation_id": cid})
     if request.tool == "shell":
         _ensure_vulnerable_demo_allowed(user)
         if not request.args:
@@ -200,7 +212,7 @@ def execute_tool(request: ToolRequest, user: AuthContext = Depends(get_current_u
         result = run_shell_command(request.args[0])
         return {"tool": request.tool, "result": result, "mode": "vulnerable"}
 
-    _ensure_tool_role(request.tool, user)
+    _ensure_tool_capability(request.tool, user)
     tools.authenticate_user(user.user_id)
 
     if request.tool == "read_file":
@@ -283,10 +295,20 @@ def health() -> Dict[str, str]:
 
 
 @app.get("/security/audit")
-def read_audit(user: AuthContext = Depends(require_roles("admin"))) -> Dict[str, Any]:
+def read_audit(user: AuthContext = Depends(require_capability(Capability.SECURITY_AUDIT))) -> Dict[str, Any]:
     """Journal d'audit (admin uniquement)."""
     records = audit.read()
     return {"count": len(records), "events": records[-200:]}
+
+
+@app.get("/auth/capabilities")
+def list_capabilities(user: AuthContext = Depends(resolve_auth)) -> Dict[str, Any]:
+    """List capabilities for the current user."""
+    return {
+        "user_id": user.user_id,
+        "roles": sorted(user.roles),
+        "capabilities": sorted(c.value for c in user.capabilities),
+    }
 
 
 if __name__ == "__main__":
