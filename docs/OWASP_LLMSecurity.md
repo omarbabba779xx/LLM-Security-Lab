@@ -1,4 +1,4 @@
-# OWASP Top 10 for LLM Applications - Guide de travail
+﻿# OWASP Top 10 for LLM Applications - Guide de travail
 
 ## Positionnement du TP
 
@@ -29,9 +29,9 @@ Dans ce depot, les noms `LLM01` a `LLM10` sont donc utilises comme **repere peda
 - neutralisation du contexte suspect avant generation
 
 **Fichiers**
-- [app/vulnerable/rag_system.py](/C:/Users/omarb/OneDrive/Documents/projet%20cyber/app/vulnerable/rag_system.py:1)
-- [app/secure/filters.py](/C:/Users/omarb/OneDrive/Documents/projet%20cyber/app/secure/filters.py:1)
-- [app/secure/rag_system.py](/C:/Users/omarb/OneDrive/Documents/projet%20cyber/app/secure/rag_system.py:1)
+- [app/vulnerable/rag_system.py](../app/vulnerable/rag_system.py)
+- [app/secure/filters.py](../app/secure/filters.py)
+- [app/secure/rag_system.py](../app/secure/rag_system.py)
 
 ### LLM02: Insecure Output Handling
 
@@ -44,7 +44,7 @@ Dans ce depot, les noms `LLM01` a `LLM10` sont donc utilises comme **repere peda
 - couche de verification avant exposition de la reponse
 
 **Fichiers**
-- [app/secure/filters.py](/C:/Users/omarb/OneDrive/Documents/projet%20cyber/app/secure/filters.py:1)
+- [app/secure/filters.py](../app/secure/filters.py)
 
 ### LLM03: Training Data Poisoning
 
@@ -158,3 +158,4 @@ Le bon message a donner est:
 
 - [OWASP Top 10 for LLM Applications](https://owasp.org/www-project-top-10-for-large-language-model-applications/)
 - [CISA AI Security Resources](https://www.cisa.gov/ai)
+

@@ -5,23 +5,34 @@ import os
 import secrets
 from typing import Any, Dict, List
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
+from app.persistence import get_audit_logger
 from app.secure.filters import DataPoisoningDetector, OutputValidator, PromptInjectionDetector, SecretLeakDetector
 from app.secure.rag_system import SecureRAG
 from app.secure.tools import SecureTools
 from app.vulnerable.rag_system import VulnerableRAG
 from app.vulnerable.tools import run_shell_command
 
+load_dotenv()
+
+limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
+
 app = FastAPI(
     title="LLM Security Lab",
     description="Demonstration de vulnerabilites LLM et contre-mesures OWASP",
-    version="1.1.0",
+    version="1.2.0",
 )
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-load_dotenv()
+audit = get_audit_logger()
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -147,13 +158,15 @@ def _get_secure_rag_for_user(user_id: str) -> SecureRAG:
 
 
 @app.post("/rag/query")
-def rag_query(request: QueryRequest, user: AuthContext = Depends(get_current_user)) -> Dict[str, Any]:
+@limiter.limit("30/minute")
+def rag_query(request: Request, body: QueryRequest, user: AuthContext = Depends(get_current_user)) -> Dict[str, Any]:
     """Interroger le systeme RAG securise ou, explicitement, le mode vulnerable."""
-    if request.use_secure:
-        return _get_secure_rag_for_user(user.user_id).generate_response(request.query)
+    audit.log("rag_query", {"user": user.user_id, "secure": body.use_secure})
+    if body.use_secure:
+        return _get_secure_rag_for_user(user.user_id).generate_response(body.query)
 
     _ensure_vulnerable_demo_allowed(user)
-    return vuln_rag.generate_response(request.query)
+    return vuln_rag.generate_response(body.query)
 
 
 @app.post("/rag/document")
@@ -179,6 +192,7 @@ def add_document(
 @app.post("/tools/execute")
 def execute_tool(request: ToolRequest, user: AuthContext = Depends(get_current_user)) -> Dict[str, Any]:
     """Executer un outil securise; le mode vulnerable reste opt-in et admin-only."""
+    audit.log("tool_execute", {"user": user.user_id, "tool": request.tool})
     if request.tool == "shell":
         _ensure_vulnerable_demo_allowed(user)
         if not request.args:
@@ -260,6 +274,19 @@ def run_benchmark() -> Dict[str, Any]:
 
     passed = sum(1 for result in results if list(result.values())[1])
     return {"results": results, "passed": passed, "total": len(results)}
+
+
+@app.get("/health")
+def health() -> Dict[str, str]:
+    """Healthcheck public pour supervision."""
+    return {"status": "ok", "version": app.version}
+
+
+@app.get("/security/audit")
+def read_audit(user: AuthContext = Depends(require_roles("admin"))) -> Dict[str, Any]:
+    """Journal d'audit (admin uniquement)."""
+    records = audit.read()
+    return {"count": len(records), "events": records[-200:]}
 
 
 if __name__ == "__main__":

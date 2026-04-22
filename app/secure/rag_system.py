@@ -9,12 +9,13 @@ from .filters import (
     SecretLeakDetector,
     normalize_for_detection,
 )
+from ..llm_backend import LLMBackend
 
 
 class SecureRAG:
     """Systeme RAG avec protections de securite."""
 
-    def __init__(self):
+    def __init__(self, llm: LLMBackend | None = None):
         self.documents = []
         self.audit_log = []
         self.prompt_filter = PromptInjectionDetector()
@@ -23,6 +24,7 @@ class SecureRAG:
         self.poisoning_detector = DataPoisoningDetector()
         self.max_context_length = 5000
         self.max_query_length = 500
+        self.llm = llm or LLMBackend()
 
     def add_document(self, doc_id: str, content: str, metadata: dict | None = None):
         """Ajoute un document avec analyse d'empoisonnement."""
@@ -115,7 +117,11 @@ class SecureRAG:
             f"[REPONSE - Respecter les instructions systeme]"
         )
 
-        response_text = self._secure_mock_response(query, context)
+        if self.llm.is_real:
+            response_text = self.llm.generate(system_msg, query, context)
+        else:
+            response_text = self._secure_mock_response(query, context)
+
         validation = self.output_validator.validate(response_text)
 
         leak_scan = self.secret_filter.scan_text(response_text)
@@ -136,6 +142,7 @@ class SecureRAG:
             "validation": validation,
             "leak_scan": leak_scan,
             "blocked": False,
+            "llm_backend": "real" if self.llm.is_real else "mock",
         }
 
     def _secure_mock_response(self, query: str, context: List[str]) -> str:

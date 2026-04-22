@@ -1,5 +1,6 @@
-"""Moteur LLM simulé pour la démonstration de sécurité."""
+"""Moteur LLM avec support OpenAI optionnel et fallback simulé."""
 import json
+import os
 import re
 from typing import Any
 
