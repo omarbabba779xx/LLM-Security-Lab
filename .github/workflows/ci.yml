@@ -90,7 +90,7 @@ jobs:
         run: bandit -r app/ --severity-level medium -f screen || true
 
       - name: pip-audit (dependency vulnerabilities)
-        run: pip-audit --requirement requirements.txt --output json || true
+        run: pip-audit --requirement requirements.txt --format json || true
 
       - name: Semgrep (SAST)
         run: semgrep scan --config auto app/ --json --output semgrep-report.json || true
@@ -122,7 +122,7 @@ jobs:
           pip install cyclonedx-bom
 
       - name: Generate CycloneDX SBOM
-        run: cyclonedx-py environment --output sbom.json --output-format json
+        run: cyclonedx-py environment -o sbom.json --of json --no-validate
 
       - name: Upload SBOM
         uses: actions/upload-artifact@v4
